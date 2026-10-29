@@ -17,7 +17,8 @@ import os from 'node:os'
 import path from 'node:path'
 import type { ElectronApplication, Page } from '@stablyai/playwright-test'
 import { expect, test } from './helpers/orca-app'
-import { waitForActiveWorktree, waitForSessionReady } from './helpers/store'
+import { ensureTerminalVisible, waitForActiveWorktree, waitForSessionReady } from './helpers/store'
+import { waitForActivePanePtyId } from './helpers/terminal'
 import { visitSettingsPanes } from './helpers/settings-pane-visits'
 import { buildWslExecArgs } from '../../src/shared/wsl-login-shell-command'
 import { quotePosixShell } from '../../src/shared/shell-argument-quoting'
@@ -104,8 +105,8 @@ function isDistroRunning(distro: string): Promise<boolean> {
   })
 }
 
-/** How long a just-terminated instance may still be listed before the first not-running read. */
-const TERMINATE_GRACE_MS = 3_000
+/** How long a just-terminated instance may still be listed: two reads, each up to 5 s on a loaded runner. */
+const TERMINATE_GRACE_MS = 10_000
 
 /**
  * Polls the running list once a second, never overlapping, from right after `--terminate`.
@@ -266,6 +267,26 @@ function startsDistro(spawn: SpawnRecord, distro: string): boolean {
   return !NON_BOOTING_WSL_VERBS.has(args[0] ?? '')
 }
 
+/** Waits until no wsl.exe launch has been logged for 3 s, so a user act's tail is over. */
+async function waitForWslLaunchesToSettle(): Promise<void> {
+  let last = { count: -1, since: 0 }
+  await expect
+    .poll(
+      () => {
+        const count = readSpawnLog(SPAWN_LOG).filter((spawn) =>
+          /(^|[\\/])wsl(\.exe)?$/i.test(spawn.file)
+        ).length
+        const now = performance.now()
+        if (count !== last.count) {
+          last = { count, since: now }
+        }
+        return now - last.since >= 3_000
+      },
+      { timeout: 60_000, intervals: [500] }
+    )
+    .toBe(true)
+}
+
 async function cycleWindowFocus(page: Page): Promise<void> {
   await page.evaluate(() => {
     window.dispatchEvent(new Event('blur'))
@@ -319,10 +340,16 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
         await store.getState().updateWorktreeMeta(worktree.id, { linkedIssue: 1, linkedPR: 2 })
         return { worktreeId: worktree.id, repoId: added.repo.id }
       }, uncPath)
+      // Focusing it is a user act that opens a WSL terminal. Let that launch (its PTY, hook relay
+      // and agent probes) finish before the terminate, or it boots the distro after it.
+      await recordMainProcessSpawns(electronApp, SPAWN_LOG)
       await activate(page, wslWorktreeId.worktreeId)
+      await ensureTerminalVisible(page, 60_000)
+      await waitForActivePanePtyId(page, 60_000)
+      await waitForWslLaunchesToSettle()
+      timeline('WSL workspace terminal launched and settled')
       await activate(page, localWorktreeId)
 
-      await recordMainProcessSpawns(electronApp, SPAWN_LOG)
       // Counted from before the terminate, so work started while it stops counts too.
       const spawnsBefore = readSpawnLog(SPAWN_LOG).length
       timeline('terminate')
