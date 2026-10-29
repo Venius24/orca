@@ -39,6 +39,8 @@ const SETTINGS_PANES = [
 
 type SpawnRecord = { file: string; args: string[] }
 
+const WSL_EXE = /(^|[\\/])wsl(\.exe)?$/i
+
 const SPAWN_LOG = path.join(os.tmpdir(), `orca-e2e-wsl-spawns-${process.pid}-${Date.now()}.jsonl`)
 // Every process-host spawn in the app (main, worker threads, inheriting children) lands here.
 test.use({ launchEnv: { ORCA_E2E_SPAWN_LOG: SPAWN_LOG } })
@@ -139,7 +141,19 @@ function watchDistroRunning(distro: string): {
       ),
     TERMINATE_GRACE_MS
   )
+  // Spawns are interleaved into the timeline so a boot can be matched to the launch before it.
+  let spawnsSeen = readSpawnLog(SPAWN_LOG).length
+  const logNewWslSpawns = (): void => {
+    const spawns = readSpawnLog(SPAWN_LOG)
+    for (const spawn of spawns.slice(spawnsSeen)) {
+      if (WSL_EXE.test(spawn.file)) {
+        timeline(`spawn ${spawn.file} ${spawn.args.join(' ')}`)
+      }
+    }
+    spawnsSeen = spawns.length
+  }
   const tick = (): void => {
+    logNewWslSpawns()
     current = isDistroRunning(distro)
       .then((running) => {
         reads += 1
@@ -175,6 +189,7 @@ function watchDistroRunning(distro: string): {
       clearTimeout(timer)
       clearTimeout(grace)
       await current
+      logNewWslSpawns()
       if (failure !== null) {
         throw new Error(`wsl --list --running kept failing: ${String(failure)}`)
       }
@@ -254,11 +269,11 @@ const NON_BOOTING_WSL_VERBS = new Set([
 
 /** Fails closed: a wsl.exe launch starts `distro` unless it names another one or only lists. */
 function startsDistro(spawn: SpawnRecord, distro: string): boolean {
-  if (!/(^|[\\/])wsl(\.exe)?$/i.test(spawn.file)) {
+  if (!WSL_EXE.test(spawn.file)) {
     return false
   }
   // main's ChildProcess#spawn args carry argv0; process-host's do not.
-  const raw = /(^|[\\/])wsl(\.exe)?$/i.test(spawn.args[0] ?? '') ? spawn.args.slice(1) : spawn.args
+  const raw = WSL_EXE.test(spawn.args[0] ?? '') ? spawn.args.slice(1) : spawn.args
   const args = raw.map((arg) => arg.toLowerCase())
   const named = args.findIndex((arg) => arg === '-d' || arg === '--distribution')
   if (named !== -1) {
@@ -273,9 +288,7 @@ async function waitForWslLaunchesToSettle(): Promise<void> {
   await expect
     .poll(
       () => {
-        const count = readSpawnLog(SPAWN_LOG).filter((spawn) =>
-          /(^|[\\/])wsl(\.exe)?$/i.test(spawn.file)
-        ).length
+        const count = readSpawnLog(SPAWN_LOG).filter((spawn) => WSL_EXE.test(spawn.file)).length
         const now = performance.now()
         if (count !== last.count) {
           last = { count, since: now }
