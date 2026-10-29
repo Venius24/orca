@@ -8,6 +8,7 @@ let observer: SpawnObserver | null = null
 /**
  * E2E only: every process-host spawn, in any thread or child that inherits the environment, is
  * appended here as a JSON line, so a guard can see spawns main's own observer never would.
+ * Logs full argv, which can include tokens; tests only (main drops it outside e2e mode).
  */
 export const E2E_SPAWN_LOG_ENV = 'ORCA_E2E_SPAWN_LOG'
 

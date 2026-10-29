@@ -87,41 +87,73 @@ function isDistroRunning(distro: string): Promise<boolean> {
   })
 }
 
-/** Polls the running list once a second, never overlapping, until stopped; three failed reads in a row fail the guard. */
+/** How long a just-terminated instance may still be listed before the first not-running read. */
+const TERMINATE_GRACE_MS = 3_000
+
+/**
+ * Polls the running list once a second, never overlapping, from right after `--terminate`.
+ * `stopped` resolves on the first not-running read, which must come within the grace; only
+ * running reads before it are forgiven, so a real boot is never waited out. Any running read
+ * after it is a boot. Three failed reads in a row fail the guard.
+ */
 function watchDistroRunning(distro: string): {
+  stopped: Promise<void>
   stop: () => Promise<{ seenRunning: boolean; reads: number }>
 } {
-  let stopped = false
+  let finished = false
+  let confirmedStopped = false
   let seenRunning = false
   let reads = 0
   let failures = 0
   let failure: unknown = null
   let timer: ReturnType<typeof setTimeout> | undefined
   let current: Promise<void> = Promise.resolve()
+  let resolveStopped: () => void = () => {}
+  let rejectStopped: (error: Error) => void = () => {}
+  const stopped = new Promise<void>((resolve, reject) => {
+    resolveStopped = resolve
+    rejectStopped = reject
+  })
+  const grace = setTimeout(
+    () =>
+      rejectStopped(
+        new Error(`${distro} was still listed ${TERMINATE_GRACE_MS} ms after --terminate`)
+      ),
+    TERMINATE_GRACE_MS
+  )
   const tick = (): void => {
     current = isDistroRunning(distro)
       .then((running) => {
         reads += 1
         failures = 0
-        seenRunning ||= running
+        if (confirmedStopped) {
+          seenRunning ||= running
+        } else if (!running) {
+          confirmedStopped = true
+          clearTimeout(grace)
+          resolveStopped()
+        }
       })
       .catch((error: unknown) => {
         failures += 1
         if (failures >= 3) {
           failure = error
+          rejectStopped(new Error(`wsl --list --running kept failing: ${String(error)}`))
         }
       })
       .finally(() => {
-        if (!stopped && failure === null) {
+        if (!finished && failure === null) {
           timer = setTimeout(tick, 1_000)
         }
       })
   }
   tick()
   return {
+    stopped,
     stop: async () => {
-      stopped = true
+      finished = true
       clearTimeout(timer)
+      clearTimeout(grace)
       await current
       if (failure !== null) {
         throw new Error(`wsl --list --running kept failing: ${String(failure)}`)
@@ -172,15 +204,21 @@ function readSpawnLog(logFile: string): SpawnRecord[] {
   return readFileSync(logFile, 'utf8')
     .split('\n')
     .filter(Boolean)
-    .map((line): SpawnRecord => {
-      const parsed: unknown = JSON.parse(line)
+    .flatMap((line): SpawnRecord[] => {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        // A line torn by a concurrent append; the next read sees it whole.
+        return []
+      }
       const file =
         parsed && typeof parsed === 'object' && 'file' in parsed ? String(parsed.file) : ''
       const args =
         parsed && typeof parsed === 'object' && 'args' in parsed && Array.isArray(parsed.args)
           ? parsed.args.map(String)
           : []
-      return { file, args }
+      return [{ file, args }]
     })
 }
 
@@ -276,6 +314,8 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
       const watcher = watchDistroRunning(DISTRO)
       let watched: { seenRunning: boolean; reads: number } | undefined
       try {
+        // The rounds start only once a read has seen it stopped, within the grace.
+        await watcher.stopped
         for (let round = 0; round < 2; round += 1) {
           await cycleWindowFocus(page)
           await activate(page, null)
