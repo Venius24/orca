@@ -1,4 +1,19 @@
 import {
+  contacts,
+  terminals,
+  retireOwner,
+  retireContact,
+  type DesktopObservationContact,
+  type DesktopTerminalObservationOwner,
+  type DesktopObservationSource
+} from './desktop-terminal-observation-lifetime'
+export {
+  retireDesktopTerminalObservation,
+  type DesktopObservationContact,
+  type DesktopTerminalObservationOwner,
+  type DesktopObservationSource
+} from './desktop-terminal-observation-lifetime'
+import {
   catalogFor,
   contactIdentity,
   terminalContactKey,
@@ -13,27 +28,6 @@ import {
   onRuntimeEnvironmentRevisionsChanged
 } from './runtime-environment-revision'
 
-export type DesktopObservationContact = {
-  key: string
-  signature: string
-  runtimeId?: string
-  revision?: number
-  active: boolean
-  modern?: boolean
-  children: Map<string, DesktopTerminalObservationOwner>
-  resources: Set<() => void>
-}
-export type DesktopTerminalObservationOwner = {
-  id: string
-  contact: DesktopObservationContact
-  incarnation?: string | null
-  active: boolean
-  sources: Set<object>
-  dispose: Set<() => void>
-  retire: () => void
-}
-const contacts = new Map<string, DesktopObservationContact>()
-const terminals = new Map<string, DesktopTerminalObservationOwner>()
 let bindings: BindingView | undefined
 let installed = false
 
@@ -68,7 +62,7 @@ export function desktopContactForTerminal(id: string) {
 }
 export function captureDesktopObservationRead(
   contact: DesktopObservationContact | null,
-  source: object
+  source: DesktopObservationSource
 ) {
   const captured = new Map<string, DesktopTerminalObservationOwner>()
   if (!contact?.active || contacts.get(contact.key) !== contact) {
@@ -91,50 +85,9 @@ export function captureDesktopObservationRead(
   }
   return captured
 }
-export function retireDesktopTerminalObservation(id: string, incarnation?: string): void {
-  const owner = terminals.get(id)
-  if (!owner || (incarnation && owner.incarnation && owner.incarnation !== incarnation)) {
-    return
-  }
-  retireOwner(owner)
-}
-function retireOwner(owner: DesktopTerminalObservationOwner) {
-  if (!owner.active) {
-    return
-  }
-  owner.active = false
-  if (terminals.get(owner.id) === owner) {
-    terminals.delete(owner.id)
-  }
-  if (owner.contact.children.get(owner.id) === owner) {
-    owner.contact.children.delete(owner.id)
-  }
-  owner.contact.resources.delete(owner.retire)
-  owner.sources.clear()
-  const disposers = [...owner.dispose]
-  owner.dispose.clear()
-  for (const dispose of disposers) {
-    dispose()
-  }
-}
-function retireContact(contact: DesktopObservationContact): void {
-  if (!contact.active) {
-    return
-  }
-  contact.active = false
-  if (contacts.get(contact.key) === contact) {
-    contacts.delete(contact.key)
-  }
-  const resources = [...contact.resources]
-  contact.resources.clear()
-  for (const dispose of resources) {
-    dispose()
-  }
-  contact.children.clear()
-}
 export function captureDesktopTerminalObservation(
   id: string,
-  source?: object,
+  source?: DesktopObservationSource,
   contact = desktopContactForTerminal(id)
 ): DesktopTerminalObservationOwner | null {
   if (!installed || !contact?.active || contacts.get(contact.key) !== contact) {
@@ -184,7 +137,7 @@ export function desktopObservationCurrent(
 }
 export function releaseDesktopObservationSource(
   owner: DesktopTerminalObservationOwner,
-  source: object
+  source: DesktopObservationSource
 ) {
   owner.sources.delete(source)
   if (

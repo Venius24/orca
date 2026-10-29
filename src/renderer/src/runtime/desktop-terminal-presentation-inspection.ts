@@ -18,12 +18,13 @@ import {
   desktopObservationCurrent,
   desktopObservationHasBinding,
   retireDesktopTerminalObservation,
-  type DesktopTerminalObservationOwner
+  type DesktopTerminalObservationOwner,
+  type DesktopObservationSource
 } from './desktop-terminal-observation-owner'
 
 type Fact = {
   value?: TerminalPresentationObservation
-  sources: Set<object>
+  sources: Set<DesktopObservationSource>
   admission?: RemoteForegroundEvidence
   generations?: Set<string>
 }
@@ -91,7 +92,7 @@ export function desktopPresentationForExit(id: string | undefined) {
 export function accept(
   owner: DesktopTerminalObservationOwner,
   value: TerminalPresentationObservation,
-  source: object
+  source: DesktopObservationSource
 ) {
   if (!owner.active) {
     return
@@ -119,7 +120,7 @@ export function accept(
   owner.incarnation = value.incarnationId
   notify(owner.id)
 }
-export function withdraw(owner: DesktopTerminalObservationOwner, source: object) {
+export function withdraw(owner: DesktopTerminalObservationOwner, source: DesktopObservationSource) {
   const fact = facts.get(owner)
   if (!fact) {
     return

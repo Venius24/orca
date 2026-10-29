@@ -3,6 +3,7 @@ import {
   shellPresentation,
   presentationFrame,
   observedRuntimeCatalog,
+  connectedSshObservationFixture,
   createRuntimeTerminalInspectionFixtures
 } from './runtime-terminal-inspection-test-fixtures'
 import {
@@ -16,7 +17,8 @@ import {
   desktopObservationContact,
   captureDesktopObservationRead,
   releaseDesktopObservationSource,
-  desktopObservationCurrent
+  desktopObservationCurrent,
+  type DesktopTerminalObservationOwner
 } from './desktop-terminal-observation-owner'
 // @vitest-environment happy-dom
 import { LOCAL_STRUCTURED_SESSION_OWNER } from './local-structured-session-owner'
@@ -87,11 +89,12 @@ describe('runtime terminal presentation routing', () => {
             childVisits[i]++
             yield owner
           }
+          return undefined
         })
       })
       const memberships = owners.map((owner) => vi.spyOn(owner.sources, 'add'))
       for (let i = 0; i < n; i++) {
-        const token = {}
+        const token = new Map<string, DesktopTerminalObservationOwner>()
         const read = captureDesktopObservationRead(contacts[i]!, token)
         expect([...read.values()]).toEqual([owners[i]])
         for (const owner of read.values()) {
@@ -108,6 +111,7 @@ describe('runtime terminal presentation routing', () => {
           compared++
           yield entry
         }
+        return undefined
       })
       derivationReads.fill(0)
       useAppStore.getState().setRuntimeEnvironmentStatus('host-0', {
@@ -142,7 +146,10 @@ describe('runtime terminal presentation routing', () => {
       expect(contacts.every((contact) => contact.resources.size === 1)).toBe(true)
       // Grow unrelated owners, then unrelated bindings, independently of the target.
       const unrelated = Array.from({ length: n }, (_, i) =>
-        captureDesktopTerminalObservation(`remote:host-1@@source-${i}`, {})!
+        captureDesktopTerminalObservation(
+          `remote:host-1@@source-${i}`,
+          new Map<string, DesktopTerminalObservationOwner>()
+        )!
       )
       let bindingVisits = 0
       const otherBindings = Array.from({ length: n }, (_, i) => `remote:host-1@@bound-${i}`)
@@ -152,13 +159,14 @@ describe('runtime terminal presentation routing', () => {
           bindingVisits++
           yield id
         }
+        return undefined
       })
       useAppStore.setState({
         ptyIdsByTabId: { ...useAppStore.getState().ptyIdsByTabId, extra: otherBindings }
       })
       expect(bindingVisits).toBe(n)
       childVisits.fill(0)
-      const token = {}
+      const token = new Map<string, DesktopTerminalObservationOwner>()
       const target = captureDesktopObservationRead(contacts[0]!, token)
       expect(target.size).toBe(1)
       expect(childVisits).toEqual([1, ...Array(n - 1).fill(0)])
@@ -170,7 +178,7 @@ describe('runtime terminal presentation routing', () => {
       useAppStore.setState({
         ptyIdsByTabId: { ...useAppStore.getState().ptyIdsByTabId, target: targetBindings }
       })
-      const largeToken = {}
+      const largeToken = new Map<string, DesktopTerminalObservationOwner>()
       const largeTarget = captureDesktopObservationRead(contacts[0]!, largeToken)
       expect(largeTarget.size).toBe(n + 1)
       expect(contacts[0]!.children.size).toBe(n + 1)
@@ -178,7 +186,10 @@ describe('runtime terminal presentation routing', () => {
         releaseDesktopObservationSource(owner, largeToken)
       }
       expect(unrelated.every((owner) => owner.active)).toBe(true)
-      const localOwner = captureDesktopTerminalObservation('local-bound', {})!
+      const localOwner = captureDesktopTerminalObservation(
+        'local-bound',
+        new Map<string, DesktopTerminalObservationOwner>()
+      )!
       const local = localOwner.contact
       const { refreshLocalStructuredSessionTabs } =
         await import('./local-structured-session-tabs-sync/inventory-refresh')
@@ -228,7 +239,7 @@ describe('runtime terminal presentation routing', () => {
     const replacement = captureDesktopTerminalObservation(id)!
     first.retire()
     expect(captureDesktopTerminalObservation(id)).toBe(replacement)
-    const independent = {}
+    const independent = new Map<string, DesktopTerminalObservationOwner>()
     captureDesktopTerminalObservation(id, independent)
     useAppStore.setState({ ptyIdsByTabId: { next: [id] } })
     expect(replacement.active).toBe(true)
@@ -279,9 +290,7 @@ describe('runtime terminal presentation routing', () => {
     expect(desktopObservationContact(environment)).not.toBe(contact)
     const sshId = 'ssh:target@@pty'
     useAppStore.setState({
-      sshConnectionStates: new Map([
-        ['target', { status: 'connected', providerEpoch: 'one', connectionGeneration: 1 }]
-      ]),
+      sshConnectionStates: connectedSshObservationFixture(),
       sshTargetGenerations: new Map([['target', 1]]),
       ptyIdsByTabId: { ssh: [sshId] }
     })
@@ -704,7 +713,7 @@ describe('runtime terminal presentation routing', () => {
         }
       })
       const contact = desktopContactForTerminal(id(0))
-      const owners = []
+      const owners: (DesktopTerminalObservationOwner | null)[] = []
       for (let i = 0; i < n; i++) {
         source.apply(frame(i))
         await inspectRuntimeTerminalProcess(id(i))

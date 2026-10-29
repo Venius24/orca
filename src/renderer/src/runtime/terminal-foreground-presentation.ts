@@ -102,7 +102,6 @@ export function createDesktopPresentationSource(
       }
     },
     capture(frame) {
-      const token = {}
       const captured = new Map<string, DesktopTerminalObservationOwner>()
       const retirements = new Map<DesktopTerminalObservationOwner, () => void>()
       const capture = (owner: DesktopTerminalObservationOwner) => {
@@ -120,16 +119,16 @@ export function createDesktopPresentationSource(
       }
       if (source.current()) {
         for (const member of members.get(frame.worktree)?.values() ?? []) {
-          member.owner.sources.add(token)
+          member.owner.sources.add(captured)
           capture(member.owner)
         }
         for (const tab of frame.tabs) {
           const id = terminalId(tab)
           const owner = id
-            ? (readOwners?.get(id) ?? captureDesktopTerminalObservation(id, token, contact))
+            ? (readOwners?.get(id) ?? captureDesktopTerminalObservation(id, captured, contact))
             : null
           if (owner?.active) {
-            owner.sources.add(token)
+            owner.sources.add(captured)
             capture(owner)
           }
         }
@@ -143,7 +142,7 @@ export function createDesktopPresentationSource(
         }
         retirements.clear()
         for (const owner of captured.values()) {
-          releaseDesktopObservationSource(owner, token)
+          releaseDesktopObservationSource(owner, captured)
         }
         captured.clear()
       }

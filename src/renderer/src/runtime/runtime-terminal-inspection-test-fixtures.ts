@@ -10,7 +10,7 @@ import { admitSshConnectionState } from '../../../shared/ssh-retained-payload-ad
 import { installDesktopTerminalObservationOwners } from './desktop-terminal-observation-owner'
 import { afterEach, beforeEach, vi, type Mock } from 'vitest'
 import { createGlobalSettingsFixture } from '../../../shared/global-settings-test-fixture'
-import { useAppStore } from '../store'
+import { useAppStore, type AppState } from '../store'
 import {
   createCompatibleRuntimeStatusResponseIfNeeded,
   type RuntimeEnvironmentCallRequest
@@ -229,4 +229,20 @@ export function installInputMarkerLayoutFixture() {
       }
     }
   })
+}
+
+export function connectedSshObservationFixture(): AppState['sshConnectionStates'] {
+  return new Map([
+    [
+      'target',
+      {
+        targetId: 'target',
+        status: 'connected',
+        error: null,
+        reconnectAttempt: 0,
+        providerEpoch: 'one',
+        connectionGeneration: 1
+      }
+    ]
+  ])
 }

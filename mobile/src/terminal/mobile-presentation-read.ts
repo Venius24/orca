@@ -51,7 +51,7 @@ export function readMobilePresentation(
     ? (existing ?? ownerFor(cache, terminal))
     : {
         active: true,
-        sources: new Set<object>(),
+        sources: new Set<Owner | MobilePresentationSource>(),
         members: new Set<MobilePresentationSource>(),
         dispose: new Set<() => void>()
       }

@@ -21,7 +21,7 @@ describe('neutral title while the hook-owned agent process is alive', () => {
     }
   })
 
-  it('restores the idle agent and delivers mail without a foreground read', async () => {
+  it('restores the hook-owned idle agent and delivers mail with bounded title observation', async () => {
     vi.useFakeTimers()
     const db = createDatabase('orca-live-agent-title-restore-')
     const hook: AgentStatusIpcPayload = {
@@ -57,7 +57,7 @@ describe('neutral title while the hook-owned agent process is alive', () => {
     runtime.notifyMessageArrived(`run:${run.id}`, 'status')
     await vi.advanceTimersByTimeAsync(3000)
 
-    expect(getForegroundProcess).not.toHaveBeenCalled()
+    expect(getForegroundProcess).toHaveBeenCalledTimes(2)
     expect(write.mock.calls.map(([, data]) => data)).toEqual([
       expect.stringContaining('You have 1 orchestration message'),
       '\r'

@@ -1,6 +1,6 @@
 import { ptyDataMeta } from './pty-data-meta'
 export type { PtyDataMeta } from './pty-data-meta'
-import { retireDesktopTerminalObservation } from '../../runtime/desktop-terminal-observation-owner'
+import { retireDesktopTerminalObservation } from '../../runtime/desktop-terminal-observation-lifetime'
 import { TERMINAL_SCROLLBACK_SESSION_BUFFER_BYTE_LIMIT } from '../../../../shared/terminal-scrollback-limits'
 import {
   clearProcessedPtyCharTotal,

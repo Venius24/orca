@@ -1,7 +1,11 @@
 // Lost push subscriptions produce no receive count or ACK; watchdog reattachment must replace stale listeners to recover the pane.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { DesktopTerminalObservationOwner } from '../../runtime/desktop-terminal-observation-owner'
 
 vi.mock('@/lib/e2e-config', () => ({ e2eConfig: { exposeStore: true } }))
+
+type ExitCallback = Parameters<Window['api']['pty']['onExit']>[0]
+type UnavailableCallback = Parameters<NonNullable<Window['api']['pty']['onWriteUnavailable']>>[0]
 
 type DataCallback = (payload: { id: string; data: string; rawLength?: number }) => void
 
@@ -9,6 +13,8 @@ describe('pty dispatcher push-listener reattach and delivery blackhole', () => {
   const originalWindow = (globalThis as { window?: typeof window }).window
 
   let dataCallbacks: DataCallback[] = []
+  let exitCallbacks: ExitCallback[] = []
+  let unavailableCallbacks: UnavailableCallback[] = []
   let dataUnsubscribes: ReturnType<typeof vi.fn>[] = []
   const ackDataMock = vi.fn()
   const reportMock = vi.fn(() =>
@@ -22,6 +28,8 @@ describe('pty dispatcher push-listener reattach and delivery blackhole', () => {
   beforeEach(() => {
     vi.resetModules()
     dataCallbacks = []
+    exitCallbacks = []
+    unavailableCallbacks = []
     dataUnsubscribes = []
     ackDataMock.mockClear()
     reportMock.mockClear()
@@ -41,7 +49,14 @@ describe('pty dispatcher push-listener reattach and delivery blackhole', () => {
             return unsubscribe
           }),
           onReplay: vi.fn(() => () => {}),
-          onExit: vi.fn(() => () => {}),
+          onExit: vi.fn((cb: ExitCallback) => {
+            exitCallbacks.push(cb)
+            return () => {}
+          }),
+          onWriteUnavailable: vi.fn((cb: UnavailableCallback) => {
+            unavailableCallbacks.push(cb)
+            return () => {}
+          }),
           onDeliveryResyncRequest: vi.fn(() => () => {}),
           respondDeliveryResync: vi.fn()
         }
@@ -103,4 +118,55 @@ describe('pty dispatcher push-listener reattach and delivery blackhole', () => {
     expect(received).toEqual(['after-reattach'])
     expect(ackDataMock).toHaveBeenCalledTimes(1)
   })
+  it.each(['unavailable', 'exit'] as const)(
+    '%s retires before callbacks and stale cleanup preserves a reentrant replacement after reattach',
+    async (event) => {
+      const dispatcher = await import('./pty-dispatcher')
+      dispatcher.ensurePtyDispatcher()
+      const owners = await import('../../runtime/desktop-terminal-observation-owner')
+      const dispose = owners.installDesktopTerminalObservationOwners()
+      try {
+        const source = new Map<string, DesktopTerminalObservationOwner>()
+        const old = owners.captureDesktopTerminalObservation('pty-1', source)!
+        old.incarnation = 'old'
+        const independent = owners.captureDesktopTerminalObservation('other-pty', source)!
+        const retired = vi.fn(() => {
+          expect(old.active).toBe(false)
+          expect(old.contact.children.has(old.id)).toBe(false)
+          expect(old.contact.resources.has(old.retire)).toBe(false)
+          expect(old.sources.size).toBe(0)
+          expect(old.dispose.size).toBe(0)
+          owners.captureDesktopTerminalObservation('pty-1', source)!.incarnation = 'new'
+        })
+        old.dispose.add(retired)
+        const callback = vi.fn(() => {
+          expect(retired).toHaveBeenCalledTimes(1)
+          const replacement = owners.captureDesktopTerminalObservation('pty-1', source)!
+          expect(replacement).not.toBe(old)
+          old.retire()
+          owners.releaseDesktopObservationSource(old, source)
+          expect(owners.captureDesktopTerminalObservation('pty-1', source)).toBe(replacement)
+          expect(replacement.active).toBe(true)
+        })
+        dispatcher.ptyWriteUnavailableHandlers.set('pty-1', callback)
+        dispatcher.ptyExitHandlers.set('pty-1', callback)
+        const offExit = dispatcher.subscribeToPtyExit('pty-1', callback)
+        dispatcher.reattachPtyDispatcherPushListeners()
+        if (event === 'exit') {
+          exitCallbacks[1]!({ id: 'pty-1', code: 0, incarnationId: 'old' })
+          expect(callback).toHaveBeenCalledTimes(2)
+        } else {
+          unavailableCallbacks[1]!({ id: 'pty-1' })
+          expect(callback).toHaveBeenCalledTimes(1)
+        }
+        exitCallbacks[1]!({ id: 'pty-1', code: 0, incarnationId: 'old' })
+        expect(owners.captureDesktopTerminalObservation('pty-1', source)?.incarnation).toBe('new')
+        expect(retired).toHaveBeenCalledTimes(1)
+        expect(independent.active).toBe(true)
+        offExit()
+      } finally {
+        dispose()
+      }
+    }
+  )
 })

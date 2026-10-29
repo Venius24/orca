@@ -10,13 +10,11 @@ import {
 import { BridgeConnectionCache } from '../mobile-web-shell/bridge/bridge-client-connection-cache'
 import { createStableLogicalRpcClient } from '../transport/stable-logical-rpc-client'
 import { scopeRpcClientToExecutionHost } from '../transport/execution-host-scoped-rpc-client'
-import {
-  createMobilePresentationSource,
-  retractMobilePresentations
-} from '../terminal/terminal-presentation'
 import { createFakeRpcClient } from '../mobile-web-shell/bridge-host-test-fakes'
 import { terminalInputSend } from '../terminal/mobile-terminal-operations'
 import {
+  createMobilePresentationSource,
+  retractMobilePresentations,
   mobilePresentationEntry,
   mobilePresentationSnapshot,
   subscribeMobilePresentation,

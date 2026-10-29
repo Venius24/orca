@@ -85,7 +85,7 @@ export function readBindings(state: AppState): BindingView {
     }
   }
   for (const [tab, layout] of Object.entries(state.terminalLayoutsByTabId)) {
-    for (const [leaf, id] of Object.entries(layout.ptyIdsByLeafId)) {
+    for (const [leaf, id] of Object.entries(layout.ptyIdsByLeafId ?? {})) {
       add(id, `${tab}:${leaf}`)
     }
   }

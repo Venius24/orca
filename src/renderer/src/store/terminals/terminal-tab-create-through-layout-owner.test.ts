@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppState } from '../types'
+import { useAppStore } from '../index'
+import {
+  installDesktopTerminalObservationOwners,
+  captureDesktopTerminalObservation
+} from '@/runtime/desktop-terminal-observation-owner'
 import type { LayoutApplyReply } from '../../../../shared/workspace-layout/workspace-layout-command-types'
 import {
   _resetLayoutFramePositionForTests,
@@ -27,6 +32,7 @@ const mocks = vi.hoisted(() => {
   return Object.assign(held, { callRuntimeRpc: vi.fn() })
 })
 
+vi.mock('../../../../shared/layout-owner-switch', () => ({ ORCA_LAYOUT_OWNER_IS_MAIN: true }))
 vi.mock('@/runtime/runtime-rpc-client', () => ({ callRuntimeRpc: mocks.callRuntimeRpc }))
 vi.mock('@/lib/resolve-owner', () => ({
   runtimeEnvironmentIdUnlessTwin: () => mocks.pairedServer,
@@ -179,6 +185,53 @@ describe('createInitialTerminalThroughLayoutOwner', () => {
 
     expect(routed).toBe(false)
     expect(mocks.callRuntimeRpc).not.toHaveBeenCalled()
+  })
+})
+
+describe('createTab with the installed presentation observer', () => {
+  it('hands an unbound tab to main and tracks later binding arrival, replacement and removal', () => {
+    const before = useAppStore.getState()
+    useAppStore.setState({
+      tabsByWorktree: {},
+      terminalLayoutsByTabId: {},
+      ptyIdsByTabId: { existing: ['existing-pty'] }
+    })
+    const dispose = installDesktopTerminalObservationOwners()
+    try {
+      const existing = captureDesktopTerminalObservation('existing-pty')!
+      const tab = useAppStore.getState().createTab(WORKTREE, undefined, undefined, {
+        recordInteraction: false
+      })
+      const layout = useAppStore.getState().terminalLayoutsByTabId[tab.id]!
+      expect(layout.ptyIdsByLeafId).toBeUndefined()
+      if (layout.root.type !== 'leaf') {
+        throw new Error('createTab must publish its initial leaf')
+      }
+      const leafId = layout.root.leafId
+      expect(mocks.callRuntimeRpc).toHaveBeenCalledWith({ kind: 'local' }, 'layout.apply', {
+        command: expect.objectContaining({ type: 'createTerminalTab', tabId: tab.id })
+      })
+      const bind = (id: string) =>
+        useAppStore.getState().setTabLayout(tab.id, {
+          ...layout,
+          ptyIdsByLeafId: { [leafId]: id }
+        })
+      bind('first-pty')
+      const first = captureDesktopTerminalObservation('first-pty')!
+      expect(first.active).toBe(true)
+      bind('replacement-pty')
+      expect(first.active).toBe(false)
+      const replacement = captureDesktopTerminalObservation('replacement-pty')!
+      first.retire()
+      expect(replacement.active).toBe(true)
+      useAppStore.getState().setTabLayout(tab.id, null)
+      expect(replacement.active).toBe(false)
+      expect(captureDesktopTerminalObservation('replacement-pty')).toBeNull()
+      expect(existing.active).toBe(true)
+    } finally {
+      dispose()
+      useAppStore.setState(before, true)
+    }
   })
 })
 

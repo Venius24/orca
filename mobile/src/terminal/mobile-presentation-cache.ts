@@ -6,18 +6,21 @@ export type Owner = {
   value?: TerminalPresentationObservation
   incarnation?: string | null
   active: boolean
-  sources: Set<object>
+  sources: Set<Owner | MobilePresentationSource>
   members: Set<MobilePresentationSource>
   dispose: Set<() => void>
   pending?: { promise: Promise<void>; current: () => boolean }
 }
 export type Client = UnvalidatedRpcRequestPort &
   Partial<Pick<RpcClient, 'getState' | 'getGeneration' | 'onStateChange'>>
+export type MobilePresentationContact = {
+  generation: number
+}
 export type Cache = {
   owners: Map<string, Owner>
   listeners: Map<string, Set<() => void>>
   sources: Map<string, MobilePresentationSource>
-  contact: object | null
+  contact: MobilePresentationContact | null
   generation: number
   runtimeId?: string
   modern?: boolean
@@ -94,7 +97,7 @@ function reconcile(client: Client, cache: Cache) {
   if (cache.generation === generation && Boolean(cache.contact) === connected) {
     return
   }
-  cache.contact = connected ? {} : null
+  cache.contact = connected ? { generation } : null
   cache.generation = generation
   cache.modern = false
   cache.runtimeId = undefined
@@ -141,7 +144,7 @@ export function releaseCache(client: Client, cache: Cache) {
     unsubscribe?.()
   }
 }
-export function current(client: Client, cache: Cache, contact: object | null) {
+export function current(client: Client, cache: Cache, contact: MobilePresentationContact | null) {
   return (
     contact !== null &&
     clients.get(client) === cache &&
@@ -180,7 +183,7 @@ export function accept(
   terminal: string,
   owner: Owner,
   value: TerminalPresentationObservation,
-  source: object
+  source: Owner | MobilePresentationSource
 ) {
   const old = owner.value
   if (old?.incarnationId === value.incarnationId) {
