@@ -11,6 +11,7 @@ import path from 'node:path'
 import type { ElectronApplication, Page } from '@stablyai/playwright-test'
 import { expect, test } from './helpers/orca-app'
 import { waitForActiveWorktree, waitForSessionReady } from './helpers/store'
+import { visitSettingsPanes } from './helpers/settings-pane-visits'
 import { buildWslExecArgs } from '../../src/shared/wsl-login-shell-command'
 import { quotePosixShell } from '../../src/shared/shell-argument-quoting'
 
@@ -190,16 +191,7 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
           await activate(page, null)
           await cycleWindowFocus(page)
           await activate(page, localWorktreeId)
-          for (const pane of SETTINGS_PANES) {
-            await page.evaluate(
-              (pane) => window.__store?.getState().openSettingsTarget({ pane, repoId: null }),
-              pane
-            )
-          }
-          await page.evaluate(
-            (repoId) => window.__store?.getState().openSettingsTarget({ pane: 'repo', repoId }),
-            wslWorktreeId.repoId
-          )
+          await visitSettingsPanes(page, SETTINGS_PANES, wslWorktreeId.repoId)
           await page.evaluate(() => window.__store?.getState().setActiveView('tasks'))
           await page.evaluate(async () => {
             // Account switches re-sync every account home, including WSL ones.
