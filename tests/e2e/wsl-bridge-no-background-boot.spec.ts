@@ -1,11 +1,18 @@
 /**
  * E9 guard on a real WSL distro: background work never starts a stopped distro. A project inside
  * the lane's distro is opened, the distro is terminated, and a window of ordinary background work
- * elsewhere must launch nothing in it; the user then opening a terminal there starts it. Runs only
+ * elsewhere must start nothing in it; the user then opening a terminal there starts it. Runs only
  * where ORCA_E2E_WSL_TERMINATE_DISTRO names a distro this run owns, since it terminates it.
+ *
+ * The running-list watcher is the authoritative assertion: `wsl --list --running`, polled through
+ * the window, sees every boot, including a plain UNC read or git.exe with a UNC cwd. The spawn log
+ * is diagnostics that name the caller: process-host spawns from any thread or inheriting child,
+ * plus main's direct child_process spawns. It cannot see direct spawnSync calls outside
+ * process-host (wsl-availability's missing-kernel `--exec /bin/true` is a documented exception)
+ * or spawns in children that drop the environment.
  */
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { ElectronApplication, Page } from '@stablyai/playwright-test'
@@ -31,6 +38,10 @@ const SETTINGS_PANES = [
 
 type SpawnRecord = { file: string; args: string[] }
 
+const SPAWN_LOG = path.join(os.tmpdir(), `orca-e2e-wsl-spawns-${process.pid}-${Date.now()}.jsonl`)
+// Every process-host spawn in the app (main, worker threads, inheriting children) lands here.
+test.use({ launchEnv: { ORCA_E2E_SPAWN_LOG: SPAWN_LOG } })
+
 function wsl(args: readonly string[]): string {
   // UTF-8 instead of wsl.exe's default UTF-16 for its own listings.
   return execFileSync('wsl.exe', [...args], {
@@ -41,18 +52,83 @@ function wsl(args: readonly string[]): string {
   })
 }
 
-/** `--list --running` never starts a distro; it exits non-zero when none runs. */
-function isDistroRunning(distro: string): boolean {
-  let listing: string
-  try {
-    listing = wsl(['--list', '--running', '--quiet'])
-  } catch {
-    return false
+/**
+ * `--list --running` never starts a distro. Exit 1 is "no running distributions"; any other
+ * failure (timeout, spawn error, other exit) rejects, so it can never read as "stopped".
+ */
+function isDistroRunning(distro: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'wsl.exe',
+      ['--list', '--running', '--quiet'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, WSL_UTF8: '1' },
+        timeout: 5_000,
+        windowsHide: true
+      },
+      (error, stdout) => {
+        if (error) {
+          if (error.code === 1 && !error.killed) {
+            resolve(false)
+          } else {
+            reject(error)
+          }
+          return
+        }
+        resolve(
+          stdout
+            .split(/\r?\n/)
+            .map((line) => line.replaceAll('\0', '').trim().toLowerCase())
+            .includes(distro.toLowerCase())
+        )
+      }
+    )
+  })
+}
+
+/** Polls the running list once a second, never overlapping, until stopped; three failed reads in a row fail the guard. */
+function watchDistroRunning(distro: string): {
+  stop: () => Promise<{ seenRunning: boolean; reads: number }>
+} {
+  let stopped = false
+  let seenRunning = false
+  let reads = 0
+  let failures = 0
+  let failure: unknown = null
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let current: Promise<void> = Promise.resolve()
+  const tick = (): void => {
+    current = isDistroRunning(distro)
+      .then((running) => {
+        reads += 1
+        failures = 0
+        seenRunning ||= running
+      })
+      .catch((error: unknown) => {
+        failures += 1
+        if (failures >= 3) {
+          failure = error
+        }
+      })
+      .finally(() => {
+        if (!stopped && failure === null) {
+          timer = setTimeout(tick, 1_000)
+        }
+      })
   }
-  return listing
-    .split(/\r?\n/)
-    .map((line) => line.replaceAll('\0', '').trim().toLowerCase())
-    .includes(distro.toLowerCase())
+  tick()
+  return {
+    stop: async () => {
+      stopped = true
+      clearTimeout(timer)
+      await current
+      if (failure !== null) {
+        throw new Error(`wsl --list --running kept failing: ${String(failure)}`)
+      }
+      return { seenRunning, reads }
+    }
+  }
 }
 
 function runInDistro(distro: string, script: string): void {
@@ -63,14 +139,17 @@ function runInDistro(distro: string, script: string): void {
 }
 
 /**
- * Logs every child the main process starts to `logFile`, one JSON line each: spawn, exec and
- * execFile all pass through ChildProcess#spawn. node-pty terminals do not, and need not.
+ * Logs main's direct child_process spawns too (spawn, exec and execFile all pass through
+ * ChildProcess#spawn), beside the process-host log. node-pty terminals do not, and need not.
  */
 async function recordMainProcessSpawns(app: ElectronApplication, logFile: string): Promise<void> {
   await app.evaluate((_electron, logFile) => {
     const fs = process.mainModule?.require('node:fs')
     const proto = process.mainModule?.require('node:child_process')?.ChildProcess?.prototype
-    if (!fs || !proto || proto.spawn.orcaE9SpawnLog) {
+    if (!fs || !proto) {
+      throw new Error('Cannot hook child_process in the main process')
+    }
+    if (proto.spawn.orcaE9SpawnLog) {
       return
     }
     const original = proto.spawn
@@ -86,7 +165,7 @@ async function recordMainProcessSpawns(app: ElectronApplication, logFile: string
   }, logFile)
 }
 
-function readMainProcessSpawns(logFile: string): SpawnRecord[] {
+function readSpawnLog(logFile: string): SpawnRecord[] {
   if (!existsSync(logFile)) {
     return []
   }
@@ -105,17 +184,32 @@ function readMainProcessSpawns(logFile: string): SpawnRecord[] {
     })
 }
 
-/** A wsl.exe launch that runs something in `distro` (or the default one); listings are fine. */
+/** wsl.exe verbs that never start a distro; any other launch counts as starting the default one. */
+const NON_BOOTING_WSL_VERBS = new Set([
+  '-l',
+  '--list',
+  '--status',
+  '--version',
+  '-v',
+  '-t',
+  '--terminate',
+  '--shutdown',
+  '--help'
+])
+
+/** Fails closed: a wsl.exe launch starts `distro` unless it names another one or only lists. */
 function startsDistro(spawn: SpawnRecord, distro: string): boolean {
   if (!/(^|[\\/])wsl(\.exe)?$/i.test(spawn.file)) {
     return false
   }
-  const args = spawn.args.slice(1).map((arg) => arg.toLowerCase())
+  // main's ChildProcess#spawn args carry argv0; process-host's do not.
+  const raw = /(^|[\\/])wsl(\.exe)?$/i.test(spawn.args[0] ?? '') ? spawn.args.slice(1) : spawn.args
+  const args = raw.map((arg) => arg.toLowerCase())
   const named = args.findIndex((arg) => arg === '-d' || arg === '--distribution')
   if (named !== -1) {
     return args[named + 1] === distro.toLowerCase()
   }
-  return args.includes('--exec') || args.includes('-e')
+  return !NON_BOOTING_WSL_VERBS.has(args[0] ?? '')
 }
 
 async function cycleWindowFocus(page: Page): Promise<void> {
@@ -153,8 +247,6 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
         'git -c user.name=e2e -c user.email=e2e@example.com commit -qm init'
     )
     const uncPath = `\\\\wsl.localhost\\${DISTRO}${repoLinuxPath.replaceAll('/', '\\')}`
-    const logDir = mkdtempSync(path.join(os.tmpdir(), 'orca-e2e-wsl-spawns-'))
-    const spawnLog = path.join(logDir, 'spawns.jsonl')
     try {
       // Open the WSL project while the distro runs: its sidebar card carries a linked issue and PR.
       const wslWorktreeId = await page.evaluate(async (path) => {
@@ -176,15 +268,13 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
       await activate(page, wslWorktreeId.worktreeId)
       await activate(page, localWorktreeId)
 
-      await recordMainProcessSpawns(electronApp, spawnLog)
+      await recordMainProcessSpawns(electronApp, SPAWN_LOG)
+      // Counted from before the terminate, so work started while it stops counts too.
+      const spawnsBefore = readSpawnLog(SPAWN_LOG).length
       wsl(['--terminate', DISTRO])
-      await expect.poll(() => isDistroRunning(DISTRO), { timeout: 60_000 }).toBe(false)
-      const spawnsBefore = readMainProcessSpawns(spawnLog).length
-      // WSL1 instances can live only seconds, so watch the running list through the whole window.
-      let seenRunning = false
-      const watcher = setInterval(() => {
-        seenRunning ||= isDistroRunning(DISTRO)
-      }, 1_000)
+      // WSL1 instances can live only seconds, so watch the running list from the terminate on.
+      const watcher = watchDistroRunning(DISTRO)
+      let watched: { seenRunning: boolean; reads: number } | undefined
       try {
         for (let round = 0; round < 2; round += 1) {
           await cycleWindowFocus(page)
@@ -204,12 +294,16 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
         // ast-grep-ignore: test-no-real-time-wait -- the claim is that nothing boots over a window of real background work
         await page.waitForTimeout(15_000)
       } finally {
-        clearInterval(watcher)
+        watched = await watcher.stop()
       }
-      const background = readMainProcessSpawns(spawnLog).slice(spawnsBefore)
+      // Authoritative: the distro never ran during the window.
+      expect(watched.reads).toBeGreaterThan(10)
+      expect(watched.seenRunning).toBe(false)
+      expect(await isDistroRunning(DISTRO)).toBe(false)
+      // Diagnostics that name the caller; non-empty so the check cannot pass vacuously.
+      const background = readSpawnLog(SPAWN_LOG).slice(spawnsBefore)
+      expect(background.length).toBeGreaterThan(0)
       expect(background.filter((spawn) => startsDistro(spawn, DISTRO))).toEqual([])
-      expect(seenRunning).toBe(false)
-      expect(isDistroRunning(DISTRO)).toBe(false)
 
       // The user opens the WSL workspace and a terminal in it: that act starts the distro.
       await activate(page, wslWorktreeId.worktreeId)
@@ -223,7 +317,7 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
       await page.screenshot({ path: testInfo.outputPath('wsl-bridge-after-terminal.png') })
     } finally {
       runInDistro(DISTRO, `rm -rf ${quotePosixShell(linuxRoot)}`)
-      rmSync(logDir, { recursive: true, force: true })
+      rmSync(SPAWN_LOG, { force: true })
     }
   })
 })

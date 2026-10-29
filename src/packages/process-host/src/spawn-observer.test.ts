@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { setSpawnObserver } from './spawn-observer'
+import { E2E_SPAWN_LOG_ENV, setSpawnObserver } from './spawn-observer'
 import { runProcess, runProcessSync, spawnProcess } from './run-process'
 
 afterEach(() => {
   setSpawnObserver(null)
+  delete process.env[E2E_SPAWN_LOG_ENV]
 })
 
 describe('spawn observer', () => {
@@ -64,5 +66,25 @@ describe('spawn observer', () => {
     setSpawnObserver(null)
     await runProcess({ program: process.execPath, args: ['-e', 'process.exit(0)'] })
     expect(calls).toBe(0)
+  })
+
+  it('logs every spawn, sync or async, to the e2e spawn log when one is named', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'orca-spawn-log-'))
+    const log = path.join(dir, 'spawns.jsonl')
+    process.env[E2E_SPAWN_LOG_ENV] = log
+    try {
+      await runProcess({ program: process.execPath, args: ['-e', 'process.exit(0)'] })
+      runProcessSync({ program: process.execPath, args: ['-e', 'process.exit(0)'] })
+      const lines = readFileSync(log, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+      expect(lines).toEqual([
+        { file: process.execPath, args: ['-e', 'process.exit(0)'] },
+        { file: process.execPath, args: ['-e', 'process.exit(0)'] }
+      ])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
