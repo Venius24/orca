@@ -11,7 +11,7 @@
  * process-host (wsl-availability's missing-kernel `--exec /bin/true` is a documented exception)
  * or spawns in children that drop the environment.
  */
-import { execFile, execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -42,14 +42,31 @@ const SPAWN_LOG = path.join(os.tmpdir(), `orca-e2e-wsl-spawns-${process.pid}-${D
 // Every process-host spawn in the app (main, worker threads, inheriting children) lands here.
 test.use({ launchEnv: { ORCA_E2E_SPAWN_LOG: SPAWN_LOG } })
 
-function wsl(args: readonly string[]): string {
-  // UTF-8 instead of wsl.exe's default UTF-16 for its own listings.
-  return execFileSync('wsl.exe', [...args], {
-    encoding: 'utf8',
-    env: { ...process.env, WSL_UTF8: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true
+/** Async with a timeout: a hung wsl.exe must fail the test, never block the worker past its timeout. */
+function wsl(args: readonly string[], timeoutMs = 60_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'wsl.exe',
+      [...args],
+      // UTF-8 instead of wsl.exe's default UTF-16 for its own listings.
+      {
+        encoding: 'utf8',
+        env: { ...process.env, WSL_UTF8: '1' },
+        timeout: timeoutMs,
+        windowsHide: true
+      },
+      (error, stdout, stderr) =>
+        error
+          ? reject(new Error(`wsl ${args.join(' ')} failed: ${String(error)} ${stderr}`))
+          : resolve(stdout)
+    )
   })
+}
+
+/** Timestamped steps in the test output, so a lane failure shows when each read and act happened. */
+const startedAt = performance.now()
+function timeline(event: string): void {
+  console.log(`[e9-guard +${Math.round(performance.now() - startedAt)}ms] ${event}`)
 }
 
 /**
@@ -126,6 +143,7 @@ function watchDistroRunning(distro: string): {
       .then((running) => {
         reads += 1
         failures = 0
+        timeline(`running list: ${distro} ${running ? 'RUNNING' : 'stopped'}`)
         if (confirmedStopped) {
           seenRunning ||= running
         } else if (!running) {
@@ -136,6 +154,7 @@ function watchDistroRunning(distro: string): {
       })
       .catch((error: unknown) => {
         failures += 1
+        timeline(`running-list read failed: ${String(error)}`)
         if (failures >= 3) {
           failure = error
           rejectStopped(new Error(`wsl --list --running kept failing: ${String(error)}`))
@@ -163,11 +182,8 @@ function watchDistroRunning(distro: string): {
   }
 }
 
-function runInDistro(distro: string, script: string): void {
-  execFileSync('wsl.exe', ['-u', 'root', ...buildWslExecArgs(distro, ['sh', '-c', script])], {
-    stdio: 'pipe',
-    windowsHide: true
-  })
+function runInDistro(distro: string, script: string): Promise<string> {
+  return wsl(['-u', 'root', ...buildWslExecArgs(distro, ['sh', '-c', script])])
 }
 
 /**
@@ -278,7 +294,7 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
     const localWorktreeId = await waitForActiveWorktree(page)
     const linuxRoot = `/tmp/orca-e9-${Date.now()}`
     const repoLinuxPath = `${linuxRoot}/repo`
-    runInDistro(
+    await runInDistro(
       DISTRO,
       `mkdir -p ${quotePosixShell(repoLinuxPath)} && cd ${quotePosixShell(repoLinuxPath)} && ` +
         'git init -q -b main . && printf "# e9\\n" > README.md && git add . && ' +
@@ -309,19 +325,25 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
       await recordMainProcessSpawns(electronApp, SPAWN_LOG)
       // Counted from before the terminate, so work started while it stops counts too.
       const spawnsBefore = readSpawnLog(SPAWN_LOG).length
-      wsl(['--terminate', DISTRO])
+      timeline('terminate')
+      await wsl(['--terminate', DISTRO], 30_000)
+      timeline('terminated')
       // WSL1 instances can live only seconds, so watch the running list from the terminate on.
       const watcher = watchDistroRunning(DISTRO)
       let watched: { seenRunning: boolean; reads: number } | undefined
       try {
         // The rounds start only once a read has seen it stopped, within the grace.
         await watcher.stopped
+        timeline('confirmed stopped')
         for (let round = 0; round < 2; round += 1) {
+          timeline(`round ${round}: focus and workspace switches`)
           await cycleWindowFocus(page)
           await activate(page, null)
           await cycleWindowFocus(page)
           await activate(page, localWorktreeId)
+          timeline(`round ${round}: settings`)
           await visitSettingsPanes(page, SETTINGS_PANES, wslWorktreeId.repoId)
+          timeline(`round ${round}: tasks and account switches`)
           await page.evaluate(() => window.__store?.getState().setActiveView('tasks'))
           await page.evaluate(async () => {
             // Account switches re-sync every account home, including WSL ones.
@@ -345,6 +367,7 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
       expect(background.length).toBeGreaterThan(0)
       expect(background.filter((spawn) => startsDistro(spawn, DISTRO))).toEqual([])
 
+      timeline(`window done: ${background.length} spawns`)
       // The user opens the WSL workspace and a terminal in it: that act starts the distro.
       await activate(page, wslWorktreeId.worktreeId)
       await page.getByRole('button', { name: 'New tab', exact: true }).first().click()
@@ -356,7 +379,9 @@ test.describe('E9: background work on a stopped real WSL distro', () => {
       await expect.poll(() => isDistroRunning(DISTRO), { timeout: 60_000 }).toBe(true)
       await page.screenshot({ path: testInfo.outputPath('wsl-bridge-after-terminal.png') })
     } finally {
-      runInDistro(DISTRO, `rm -rf ${quotePosixShell(linuxRoot)}`)
+      await runInDistro(DISTRO, `rm -rf ${quotePosixShell(linuxRoot)}`).catch((error: unknown) =>
+        timeline(`cleanup failed: ${String(error)}`)
+      )
       rmSync(SPAWN_LOG, { force: true })
     }
   })

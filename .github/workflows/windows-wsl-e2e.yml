@@ -26,7 +26,8 @@ concurrency:
 jobs:
   wsl-terminal:
     runs-on: windows-2022
-    timeout-minutes: 30
+    # The E9 guard adds three ~2-5 minute runs to the launch, paste and image checks.
+    timeout-minutes: 50
     env:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
