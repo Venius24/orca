@@ -121,9 +121,13 @@ async function failedStart(agent: 'pi' | 'codex' | 'grok', script: ScriptedAgent
   expect(script.spawns()).toBe(5)
 }
 
-it('Pi records one failure without dispatch after a failed start', async () => {
-  await failedStart('pi', piScriptedChild())
-})
+it(
+  'Pi records one failure without dispatch after a failed start',
+  /* TEMP CI repeat evidence */ { repeats: 100 },
+  async () => {
+    await failedStart('pi', piScriptedChild())
+  }
+)
 it('Codex records one failure without dispatch after a failed start', async () => {
   await failedStart('codex', codexScriptedChild())
 })
